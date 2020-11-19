@@ -1,39 +1,15 @@
 -- Implementation of markov chain
 CREATE TABLE IF NOT EXISTS chain_table
 (
-    state   text[], -- State of chain
-    choices text[], -- Possible
-    cumdist integer[],
+    state   text[], -- Words array - state of chain
+    choices text[], -- Choices array - possible extensions of 'state' words
+    cumdist integer[], -- Occurrence of each word in 'choices'
 
     CONSTRAINT pk_chain_table
         PRIMARY KEY (state)
 );
 
--- Binary search algorithm
-CREATE OR REPLACE FUNCTION binary_search(arr integer[], elem float) RETURNS integer
-    LANGUAGE plpgsql
-AS
-$$
-DECLARE
-    idx         integer;
-    left_index  integer;
-    right_index integer;
-BEGIN
-    left_index := 0;
-    right_index := array_length(arr, 1) + 1;
-    WHILE left_index < right_index - 1
-        LOOP
-            idx := (left_index + right_index) / 2;
-            IF arr[idx] < elem THEN
-                left_index := idx;
-            ELSE
-                right_index := idx;
-            END IF;
-        END LOOP;
-    RETURN right_index;
-END
-$$;
-
+-- TEXT PROCESSING
 
 -- Tokenize text to array of sentences removing brackets, punctuation and sentences endings
 CREATE OR REPLACE FUNCTION tokenize(text_corpus text) RETURNS text[][]
@@ -90,7 +66,6 @@ BEGIN
 END
 $$;
 
-
 -- Tokenize each text from text corpus to get array of sentences
 CREATE OR REPLACE FUNCTION get_sentences_generator(text_corpus text[]) RETURNS text[]
     LANGUAGE plpgsql
@@ -112,8 +87,9 @@ BEGIN
 END
 $$;
 
+-- MARKOV CHAIN FUNCTIONS
 
--- Accumulate array: [4, 5, 1] => [4, 9, 10]
+-- Help function for getting occurrences of words - accumulate array: [4, 5, 1] => [4, 9, 10]
 CREATE OR REPLACE FUNCTION accumulate(arr integer[]) RETURNS integer[]
     LANGUAGE plpgsql
 AS
@@ -132,9 +108,8 @@ BEGIN
 END
 $$;
 
-
 -- Build markov chain from text corpus
-CREATE OR REPLACE FUNCTION build_chain(sentences text[], state_size integer) RETURNS chain_table
+CREATE OR REPLACE FUNCTION train_chain(sentences text[], state_size integer) RETURNS chain_table
     LANGUAGE plpgsql
 AS
 $$
@@ -152,7 +127,7 @@ BEGIN
     begin_word := '__BEGIN__';
     end_word := '__END__';
 
-
+    -- Create temporary table for model representation
     CREATE TEMP TABLE temp_model
     (
         state   text[],
@@ -160,6 +135,7 @@ BEGIN
         counter integer[]
     );
 
+    -- Function for searching state in temporary table
     CREATE OR REPLACE FUNCTION state_exist(model_state text[]) RETURNS boolean
         LANGUAGE plpgsql
     AS
@@ -175,6 +151,7 @@ BEGIN
     END
     $innerstate$;
 
+    -- Function for searching specific word (follow) for state in temporary table
     CREATE OR REPLACE FUNCTION get_follow_index(model_state text[], follow text) RETURNS integer
         LANGUAGE plpgsql
     AS
@@ -195,10 +172,12 @@ BEGIN
     END
     $innerfollow$;
 
-
+    -- Looping over sentences of processed text corpus
     FOR i IN 1 .. array_upper(sentences, 1)
         LOOP
             sentence := sentences[i];
+
+            --
             FOR t IN 1 .. state_size
                 LOOP
                     items := array_append(items, begin_word);
@@ -247,7 +226,32 @@ BEGIN
 END
 $$;
 
+-- Help function - binary search algorithm for weighted word selection for the continuation of a phrase
+CREATE OR REPLACE FUNCTION binary_search(arr integer[], elem float) RETURNS integer
+    LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    idx         integer;
+    left_index  integer;
+    right_index integer;
+BEGIN
+    left_index := 0;
+    right_index := array_length(arr, 1) + 1;
+    WHILE left_index < right_index - 1
+        LOOP
+            idx := (left_index + right_index) / 2;
+            IF arr[idx] < elem THEN
+                left_index := idx;
+            ELSE
+                right_index := idx;
+            END IF;
+        END LOOP;
+    RETURN right_index;
+END
+$$;
 
+-- Moving the chain through the state space
 CREATE OR REPLACE FUNCTION chain_move(text[]) RETURNS integer
     LANGUAGE plpgsql
 AS
@@ -266,7 +270,7 @@ BEGIN
 END;
 $$;
 
-
+-- Chain walk through the state space
 CREATE OR REPLACE FUNCTION chain_walk(init_state text[]) RETURNS integer[]
     LANGUAGE plpgsql
 AS
@@ -290,3 +294,4 @@ BEGIN
 END
 $$;
 
+-- TEXT GENERATING PROCEDURES
