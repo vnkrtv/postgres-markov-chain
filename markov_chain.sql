@@ -67,7 +67,7 @@ END
 $$;
 
 -- Tokenize each text from text corpus to get array of sentences
-CREATE OR REPLACE FUNCTION get_sentences_generator(text_corpus text[]) RETURNS text[]
+CREATE OR REPLACE FUNCTION get_train_corpus(text_corpus text[]) RETURNS text[]
     LANGUAGE plpgsql
 AS
 $$
@@ -109,7 +109,7 @@ END
 $$;
 
 -- Build markov chain from text corpus
-CREATE OR REPLACE FUNCTION train_chain(sentences text[], state_size integer) RETURNS chain_table
+CREATE OR REPLACE PROCEDURE train_chain(sentences text[], state_size integer)
     LANGUAGE plpgsql
 AS
 $$
@@ -122,7 +122,6 @@ DECLARE
     follow       text;
     follow_index integer;
     table_row    record;
-    model        chain_table;
 BEGIN
     begin_word := '__BEGIN__';
     end_word := '__END__';
@@ -214,15 +213,13 @@ BEGIN
 
     FOR table_row IN (SELECT * FROM temp_model)
         LOOP
-            INSERT INTO model(state, choices, cumdist)
+            INSERT INTO chain_table(state, choices, cumdist)
             VALUES (table_row.state, table_row.follows, accumulate(table_row.counter));
         END LOOP;
 
     DROP FUNCTION state_exist(model_state text[]);
     DROP FUNCTION get_follow_index(model_state text[], follow text);
     DROP TABLE temp_model;
-
-    RETURN model;
 END
 $$;
 
@@ -295,3 +292,48 @@ END
 $$;
 
 -- TEXT GENERATING PROCEDURES
+
+-- Train Markov chain with specified state size on input text corpus
+CREATE OR REPLACE PROCEDURE build_markov_chain(text_corpus text[], state_size integer)
+    LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    train_corpus text[];
+BEGIN
+    train_corpus := get_train_corpus(text_corpus);
+    CALL train_chain(train_corpus, state_size);
+END
+$$;
+
+-- Generate phrase by input phrase
+CREATE OR REPLACE FUNCTION generate_phrase(input_phrase text) RETURNS text
+    LANGUAGE plpgsql
+AS
+$$
+DECLARE
+    phrase     text;
+    words_arr  text[];
+    state_size integer;
+    init_state text[];
+BEGIN
+    state_size := (
+        SELECT array_length(state, 1)
+        FROM chain_table
+        LIMIT 1);
+    init_state := string_to_array(input_phrase, ' ');
+    init_state := init_state[array_length(init_state, 1) - state_size:array_length(init_state, 1)];
+
+    words_arr := chain_walk(init_state);
+    phrase := '';
+    FOR i IN 1 .. array_length(init_state, 1) - state_size - 1
+        LOOP
+            phrase := phrase || init_state[i] || ' ';
+        END LOOP;
+    FOR i IN 1 .. array_length(words_arr, 1)
+        LOOP
+            phrase := phrase || words_arr[i] || ' ';
+        END LOOP;
+    RETURN phrase;
+END
+$$;
