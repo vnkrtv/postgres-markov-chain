@@ -31,84 +31,65 @@ CREATE OR REPLACE PROCEDURE train_chain(text_corpus text[], state_size integer)
 AS
 $$
 DECLARE
-    begin_word   text;
-    end_word     text;
-    items        text[];
-    sentences    text[];
-    words        text[];
-    buf_state    text[];
-    follow       text;
-    follow_index integer;
-    table_row    record;
+    begin_word     text;
+    end_word       text;
+    items          text[];
+    sentences      text[];
+    words          text[];
+    buf_state      text[];
+    follow         text;
+    cur_state_size integer;
+    table_row      record;
 BEGIN
-    begin_word := '__BEGIN__';
-    end_word := '__END__';
+    begin_word := '__begin__';
+    end_word := '__end__';
 
+    -- If new state size differs from current state size, truncate model table
+    cur_state_size := (
+        SELECT array_length(state, 1)
+        FROM chain_table
+        LIMIT 1);
+    IF cur_state_size <> state_size THEN
+        TRUNCATE TABLE chain_table;
+    END IF;
     DROP INDEX IF EXISTS pk_chain_table;
-    TRUNCATE TABLE chain_table;
 
     -- Create temporary table for model representation
     CREATE TEMP TABLE temp_model
     (
         state   text[],
-        follows text[],
-        counter integer[]
+        follows text,
+        counter integer
     );
 
-    -- Function for searching state in temporary table
-    CREATE FUNCTION state_exist(model_state text[]) RETURNS boolean
+    -- Function for searching specific word (follow) for state in temporary table
+    CREATE FUNCTION follows_exist(model_state text[], follow text) RETURNS boolean
         LANGUAGE plpgsql
     AS
-    $innerstate$
+    $innerfollow$
     BEGIN
-        IF (SELECT COUNT(*)
+        IF (SELECT follows
             FROM temp_model
-            WHERE state = model_state) > 0 THEN
+            WHERE state = model_state
+              AND follows = follow
+            LIMIT 1) IS NOT NULL THEN
             RETURN true;
         ELSE
             RETURN false;
         end if;
     END
-    $innerstate$;
-
-    -- Function for searching specific word (follow) for state in temporary table
-    CREATE FUNCTION get_follow_index(model_state text[], follow text) RETURNS integer
-        LANGUAGE plpgsql
-    AS
-    $innerfollow$
-    DECLARE
-        follows_arr text[];
-    BEGIN
-        follows_arr := (SELECT follows
-                        FROM temp_model
-                        WHERE state = model_state
-                          AND array [follow]::text[] && follows
-                        LIMIT 1);
-        IF follows_arr IS NOT NULL THEN
-            RETURN array_position(follows_arr, follow);
-        ELSE
-            RETURN 0;
-        end if;
-    END
     $innerfollow$;
-    RAISE NOTICE 'texts count: %', array_length(text_corpus, 1);
 
     -- Looping over sentences of processed text corpus
     FOR i IN 1 .. array_upper(text_corpus, 1)
         LOOP
             sentences := tokenize(text_corpus[i]);
-            RAISE NOTICE 'text %: % sentences', i, array_length(sentences, 1);
-
             FOR k IN 1 .. array_length(sentences, 1)
                 LOOP
                     words := split_sentence(sentences[k]);
                     IF array_length(words, 1) IS NULL THEN
                         CONTINUE;
                     END IF;
-
-                    IF i = 3 THEN
-                        RAISE NOTICE 'sentence: %', array_length(words, 1);
-                    end if;
 
                     FOR t IN 1 .. state_size
                         LOOP
@@ -129,36 +110,33 @@ BEGIN
                                 END LOOP;
                             follow := items[t + state_size];
 
-                            IF NOT state_exist(buf_state) THEN
-                                INSERT INTO temp_model(state, follows, counter)
-                                VALUES (buf_state, array []::text[], array []::integer[]);
-                            END IF;
-
-                            follow_index := get_follow_index(buf_state, follow);
-                            IF follow_index > 0 THEN
+                            IF follows_exist(buf_state, follow) THEN
                                 UPDATE temp_model
-                                SET counter[follow_index] = 1
-                                WHERE state = buf_state;
+                                SET counter = counter + 1
+                                WHERE state = buf_state
+                                  AND follows = follow;
+                            ELSE
+                                INSERT INTO temp_model(state, follows, counter)
+                                VALUES (buf_state, follow, 1);
                             END IF;
-
-                            UPDATE temp_model
-                            SET counter[follow_index] = counter[follow_index] + 1
-                            WHERE state = buf_state;
 
                         END LOOP;
                 END LOOP;
         END LOOP;
 
-    RAISE NOTICE '%', (SELECT COUNT(*) FROM temp_model)::integer;
-
-    FOR table_row IN (SELECT * FROM temp_model)
+    FOR table_row IN (SELECT state,
+                             array_agg(follows) AS choices,
+                             accumulate(array_agg(counter)) AS cumdist
+                      FROM temp_model
+                      GROUP BY state)
         LOOP
-            INSERT INTO chain_table(state, choices, cumdist)
-            VALUES (table_row.state, table_row.follows, accumulate(table_row.counter));
+            IF table_row.cumdist IS NOT NULL THEN
+                INSERT INTO chain_table(state, choices, cumdist)
+                VALUES (table_row.state, table_row.choices, accumulate(table_row.cumdist));
+            END IF;
         END LOOP;
 
-    DROP FUNCTION state_exist(model_state text[]);
-    DROP FUNCTION get_follow_index(model_state text[], follow text);
+    DROP FUNCTION follows_exist(model_state text[], follow text);
     DROP TABLE temp_model;
 
     CREATE INDEX pk_chain_table
@@ -192,7 +170,7 @@ END
 $$;
 
 -- Moving the chain through the state space
-CREATE OR REPLACE FUNCTION chain_move(text[]) RETURNS integer
+CREATE OR REPLACE FUNCTION chain_move(text[]) RETURNS text
     LANGUAGE plpgsql
 AS
 $$
@@ -204,14 +182,14 @@ BEGIN
     SELECT choices, cumdist
     INTO choices_arr, cumdist_arr
     FROM chain_table
-    WHERE state = $1;
-    rand := random() * choices_arr[array_upper(choices_arr, 1)];
-    RETURN choices_arr[binary_search(choices_arr, rand)];
+    WHERE array_eq(state, $1);
+    rand := random() * cumdist_arr[array_upper(cumdist_arr, 1)];
+    RETURN choices_arr[binary_search(cumdist_arr, rand)];
 END;
 $$;
 
 -- Chain walk through the state space
-CREATE OR REPLACE FUNCTION chain_walk(init_state text[]) RETURNS integer[]
+CREATE OR REPLACE FUNCTION chain_walk(init_state text[], phrase_len integer = 10) RETURNS text[]
     LANGUAGE plpgsql
 AS
 $$
@@ -220,15 +198,18 @@ DECLARE
     state    text[];
     word     text;
     end_word text;
+    i        integer;
 BEGIN
-    end_word := '__END__';
+    i := 0;
+    end_word := '__end__';
     state := init_state;
     word := chain_move(state);
-    WHILE word IS NOT NULL OR word <> end_word
+    WHILE word IS NOT NULL AND word <> end_word AND i < phrase_len
         LOOP
             phrase := array_append(phrase, word);
             state := array_append(state[2:], word);
             word := chain_move(state);
+            i := i + 1;
         END LOOP;
     RETURN phrase;
 END

@@ -13,9 +13,9 @@ DECLARE
     re_remove_punctuation text;
 BEGIN
     -- Init regex
-    re_to_sentences := '(?<!\w\.\w.)(?<![A-Z][a-z][а-я][А-Я]\.)(?<=\.|\?)\s';
+    re_to_sentences := '(?<!\w\.\w.)(?<![A-Z][a-z][а-я][А-Я]ёЁ\.)(?<=\.|\?)\s';
     re_remove_brackets := '\((.*?)\)';
-    re_remove_punctuation := '[^a-zA-Zа-яА-Я ]';
+    re_remove_punctuation := '[^a-zA-Zа-яА-ЯёЁ ]';
 
     -- Split text corpus to array of texts
     texts_arr := string_to_array(text_corpus, '\n');
