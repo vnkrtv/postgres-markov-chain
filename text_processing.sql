@@ -1,5 +1,5 @@
 -- Tokenize text to array of sentences removing brackets, punctuation and sentences endings
-CREATE OR REPLACE FUNCTION tokenize(text_corpus text) RETURNS text[][]
+CREATE OR REPLACE FUNCTION tokenize(text_corpus text) RETURNS text[]
     LANGUAGE plpgsql
 AS
 $$
@@ -21,8 +21,8 @@ BEGIN
     texts_arr := string_to_array(text_corpus, '\n');
 
     -- Remove empty strings
-    texts_arr := (WITH cte(arr1, arr2) as (
-        values (texts_arr, array [''])
+    texts_arr := (WITH cte(arr1, arr2) AS (
+        VALUES (texts_arr, array [''])
     )
                   SELECT array_agg(elem)
                   FROM cte,
@@ -35,9 +35,11 @@ BEGIN
         buf_sentences_arr := regexp_split_to_array(texts_arr[i], re_to_sentences);
             FOR t IN 1 .. array_upper(buf_sentences_arr, 1)
                 LOOP
-                    buf_text := substr(buf_sentences_arr[t], 1, length(buf_sentences_arr[t]) - 1);
-                    IF buf_text <> '' THEN
-                        sentences := array_append(sentences, buf_text);
+                    IF buf_sentences_arr[t] <> '' THEN
+                        buf_text := substr(buf_sentences_arr[t], 1, length(buf_sentences_arr[t]) - 1);
+                        IF buf_text <> '' THEN
+                            sentences := array_append(sentences, buf_text);
+                        END IF;
                     END IF;
                 END LOOP;
         END LOOP;
@@ -47,29 +49,33 @@ BEGIN
         LOOP
             sentences[i] := regexp_replace(sentences[i], re_remove_brackets, '');
             sentences[i] := regexp_replace(sentences[i], re_remove_punctuation, '');
+            sentences[i] := lower(sentences[i]);
         END LOOP;
 
     RETURN sentences;
 END
 $$;
 
--- Tokenize each text from text corpus to get array of sentences
-CREATE OR REPLACE FUNCTION get_train_corpus(text_corpus text[]) RETURNS text[]
+-- Process sentence to array of words
+CREATE OR REPLACE FUNCTION split_sentence(sentence text) RETURNS text[]
     LANGUAGE plpgsql
 AS
 $$
 DECLARE
-    buf_sentences_arr text[];
-    sentences         text[];
+    words_arr             text[];
 BEGIN
-    FOR i IN 1 .. array_upper(text_corpus, 1)
-        LOOP
-            buf_sentences_arr := tokenize(text_corpus[i]);
-            FOR t IN 1 .. array_upper(buf_sentences_arr, 1)
-                LOOP
-                    sentences := array_append(sentences, buf_sentences_arr[t]);
-                END LOOP;
-        END LOOP;
-    RETURN sentences;
+    -- Split text corpus to array of texts
+    words_arr := string_to_array(sentence, ' ');
+
+    -- Remove empty strings
+    words_arr := (WITH cte(arr1, arr2) AS (
+        VALUES (words_arr, array [''])
+    )
+                  SELECT array_agg(elem)
+                  FROM cte,
+                       unnest(arr1) elem
+                  WHERE elem <> ALL (arr2));
+
+    RETURN words_arr;
 END
 $$;

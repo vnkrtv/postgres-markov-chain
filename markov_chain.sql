@@ -3,10 +3,7 @@ CREATE TABLE IF NOT EXISTS chain_table
 (
     state   text[], -- Words array - state of chain
     choices text[], -- Choices array - possible extensions of 'state' words
-    cumdist integer[], -- Occurrence of each word in 'choices'
-
-    CONSTRAINT pk_chain_table
-        PRIMARY KEY (state)
+    cumdist integer[] -- Occurrence of each word in 'choices'
 );
 
 -- Help function for getting occurrences of words - accumulate array: [4, 5, 1] => [4, 9, 10]
@@ -29,7 +26,7 @@ END
 $$;
 
 -- Build markov chain from text corpus
-CREATE OR REPLACE PROCEDURE train_chain(sentences text[], state_size integer)
+CREATE OR REPLACE PROCEDURE train_chain(text_corpus text[], state_size integer)
     LANGUAGE plpgsql
 AS
 $$
@@ -37,7 +34,8 @@ DECLARE
     begin_word   text;
     end_word     text;
     items        text[];
-    sentence     text[];
+    sentences    text[];
+    words        text[];
     buf_state    text[];
     follow       text;
     follow_index integer;
@@ -45,6 +43,9 @@ DECLARE
 BEGIN
     begin_word := '__BEGIN__';
     end_word := '__END__';
+
+    DROP INDEX IF EXISTS pk_chain_table;
+    TRUNCATE TABLE chain_table;
 
     -- Create temporary table for model representation
     CREATE TEMP TABLE temp_model
@@ -55,7 +56,7 @@ BEGIN
     );
 
     -- Function for searching state in temporary table
-    CREATE OR REPLACE FUNCTION state_exist(model_state text[]) RETURNS boolean
+    CREATE FUNCTION state_exist(model_state text[]) RETURNS boolean
         LANGUAGE plpgsql
     AS
     $innerstate$
@@ -71,7 +72,7 @@ BEGIN
     $innerstate$;
 
     -- Function for searching specific word (follow) for state in temporary table
-    CREATE OR REPLACE FUNCTION get_follow_index(model_state text[], follow text) RETURNS integer
+    CREATE FUNCTION get_follow_index(model_state text[], follow text) RETURNS integer
         LANGUAGE plpgsql
     AS
     $innerfollow$
@@ -81,7 +82,7 @@ BEGIN
         follows_arr := (SELECT follows
                         FROM temp_model
                         WHERE state = model_state
-                          AND follow && follows
+                          AND array [follow]::text[] && follows
                         LIMIT 1);
         IF follows_arr IS NOT NULL THEN
             RETURN array_position(follows_arr, follow);
@@ -90,46 +91,65 @@ BEGIN
         end if;
     END
     $innerfollow$;
+    RAISE NOTICE 'texts count: %', array_length(text_corpus, 1);
 
     -- Looping over sentences of processed text corpus
-    FOR i IN 1 .. array_upper(sentences, 1)
+    FOR i IN 1 .. array_upper(text_corpus, 1)
         LOOP
-            sentence := sentences[i];
+            sentences := tokenize(text_corpus[i]);
+            RAISE NOTICE 'text %: % sentences', i, array_length(sentences, 1);
 
-            --
-            FOR t IN 1 .. state_size
+            FOR k IN 1 .. array_length(sentences, 1)
                 LOOP
-                    items := array_append(items, begin_word);
-                END LOOP;
-            FOR t IN 1 .. array_upper(sentence, 1)
-                LOOP
-                    items := array_append(items, sentence[t]);
-                END LOOP;
-            items := array_append(items, end_word);
-
-            FOR t IN 1 .. array_upper(sentence, 1) + 1
-                LOOP
-                    buf_state := items[t:t + state_size];
-                    follow := items[t + state_size];
-
-                    IF NOT state_exist(buf_state) THEN
-                        INSERT INTO temp_model(state, follows, counter)
-                        VALUES (buf_state, array [], array []);
+                    words := split_sentence(sentences[k]);
+                    IF array_length(words, 1) IS NULL THEN
+                        CONTINUE;
                     END IF;
 
-                    follow_index := get_follow_index(buf_state, follow);
-                    IF follow_index > 0 THEN
-                        UPDATE temp_model
-                        SET follows[follow_index] = 1
-                        WHERE state = buf_state;
-                    END IF;
+                    IF i = 3 THEN
+                        RAISE NOTICE 'sentence: %', array_length(words, 1);
+                    end if;
 
-                    UPDATE temp_model
-                    SET follows[follow_index] = follows[follow_index] + 1
-                    WHERE state = buf_state;
+                    FOR t IN 1 .. state_size
+                        LOOP
+                            items := array_append(items, begin_word);
+                        END LOOP;
+                    FOR t IN 1 .. array_upper(words, 1)
+                        LOOP
+                            items := array_append(items, words[t]);
+                        END LOOP;
+                    items := array_append(items, end_word);
 
+                    FOR t IN 1 .. array_upper(words, 1) + 1
+                        LOOP
+                            buf_state := array []::text[];
+                            FOR k IN t .. t + state_size - 1
+                                LOOP
+                                    buf_state := array_append(buf_state, items[k]);
+                                END LOOP;
+                            follow := items[t + state_size];
+
+                            IF NOT state_exist(buf_state) THEN
+                                INSERT INTO temp_model(state, follows, counter)
+                                VALUES (buf_state, array []::text[], array []::integer[]);
+                            END IF;
+
+                            follow_index := get_follow_index(buf_state, follow);
+                            IF follow_index > 0 THEN
+                                UPDATE temp_model
+                                SET counter[follow_index] = 1
+                                WHERE state = buf_state;
+                            END IF;
+
+                            UPDATE temp_model
+                            SET counter[follow_index] = counter[follow_index] + 1
+                            WHERE state = buf_state;
+
+                        END LOOP;
                 END LOOP;
         END LOOP;
+
+    RAISE NOTICE '%', (SELECT COUNT(*) FROM temp_model)::integer;
 
     FOR table_row IN (SELECT * FROM temp_model)
         LOOP
@@ -140,6 +160,9 @@ BEGIN
     DROP FUNCTION state_exist(model_state text[]);
     DROP FUNCTION get_follow_index(model_state text[], follow text);
     DROP TABLE temp_model;
+
+    CREATE INDEX pk_chain_table
+        ON chain_table USING hash (state);
 END
 $$;
 
