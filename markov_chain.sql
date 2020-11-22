@@ -81,7 +81,7 @@ BEGIN
     $innerfollow$;
 
     -- Looping over sentences of processed text corpus
-    FOR i IN 1 .. array_upper(text_corpus, 1)
+    FOR i IN 1 .. array_length(text_corpus, 1)
         LOOP
             sentences := tokenize(text_corpus[i]);
             FOR k IN 1 .. array_length(sentences, 1)
@@ -101,7 +101,7 @@ BEGIN
                         END LOOP;
                     items := array_append(items, end_word);
 
-                    FOR t IN 1 .. array_upper(words, 1) + 1
+                    FOR t IN 1 .. array_length(words, 1) + 1
                         LOOP
                             buf_state := array []::text[];
                             FOR k IN t .. t + state_size - 1
